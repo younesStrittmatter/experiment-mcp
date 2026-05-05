@@ -6,20 +6,20 @@ requires-python = ">=3.10"
 dependencies = [
     "mcp>=1.0.0",
     "pyyaml>=6",
+    # Domain libraries the generated tools wrap. Resolved from upstream
+    # main branches via [tool.uv.sources] below (NOT from PyPI) so we
+    # generate against the live API surface, mirroring how
+    # psyneulink-mcp pulls psyneulink from the upstream `devel` branch.
+    "sweetpea",
+    "sweetbean",
 ]
 
 [project.optional-dependencies]
-# Domain libraries the eventual MCP tools will wrap. Kept under an extra so
-# the bare server install stays lean and importing the server never pulls
-# them in (mirrors how psyneulink-mcp gates `psyche`). Tool implementations
-# must import sweetpea / sweetbean lazily inside their bodies behind
-# try/except so the server boots cleanly without the extra installed.
-experiments = [
-    "sweetpea",
-    "sweetbean",
-    # TODO: pin once Phase 2 t6e is in flight and we know the minimum
-    # versions that expose the APIs the generated tools depend on.
-]
+# Only required when using the Anthropic API adapter for build-time codegen.
+# The default `claude_cli` adapter shells out to the local `claude` CLI and
+# does not need this dep, so the install stays lean. Mirrors the
+# psyneulink-mcp [project.optional-dependencies] block.
+anthropic-api = ["anthropic>=0.40"]
 
 [tool.uv.sources]
 # psyneulink-psyche is not yet on PyPI; resolve it from the sibling repo
@@ -27,16 +27,24 @@ experiments = [
 # in the sibling are picked up without a re-sync. Same pattern as
 # `psyneulink-mcp/pyproject.toml`.
 psyneulink-psyche = { path = "../psyneulink-psyche", editable = true }
+# SweetPea + SweetBean: pull from upstream default branches rather
+# than PyPI so the generator codegens against live source. PyPI lags
+# main by months in both packages. (sweetpea-py's default branch is
+# `master`, not `main` — kept verbatim here so a future maintainer
+# noticing the asymmetry doesn't "fix" it.)
+sweetpea = { git = "https://github.com/sweetpea-org/sweetpea-py", branch = "master" }
+sweetbean = { git = "https://github.com/AutoResearch/sweetbean", branch = "main" }
 
 [project.scripts]
-experiment-mcp = "experiment_mcp.server:main"
+experiment-mcp           = "experiment_mcp.server:main"
+experiment-mcp-generate  = "experiment_mcp.generator.orchestrator:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
-    # PSYCHE schemas are pulled in for the dev install only until Phase 2
-    # t6e starts wiring them into real tools. See `[tool.uv.sources]` above.
+    # PSYCHE schemas are pulled in for the dev install. Used by the
+    # generator + tools at codegen time.
     "psyneulink-psyche",
 ]
 

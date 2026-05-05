@@ -105,21 +105,76 @@ This is *not* the same as forbidden cross-repo coupling. A multi-repo
 dev session produces independent commits in independent repos that
 each respect the boundary.
 
-## The generator pattern (planned)
+## The generator pattern
 
-Will mirror `psyneulink-mcp`:
+Mirrors `psyneulink-mcp` 1:1 except for the introspection seam, which is
+multi-root (sweetpea + sweetbean) instead of single-root.
 
-1. Introspect `sweetpea` + `sweetbean` at build time, driven by
-   `generator/seeds.txt`.
-2. For each public class/function in the seed, send source + docstring
-   to an LLM adapter.
-3. LLM writes an LLM-friendly tool description + JSON schema.
-4. Output is committed Python under
-   `src/experiment_mcp/tools/generated/`.
-5. Re-run when SweetPea / SweetBean updates; review the diff.
+1. **Seeds:** `generator/seeds.txt` lists what to wrap, using the same
+   four directives as the sibling — `import-walk:`, `symbol:`,
+   `package:`, `method:`. The committed file walks the top-level
+   packages plus `sweetbean.stimulus` / `sweetbean.stimulus_spec` /
+   `sweetbean.response_spec` / `sweetbean.block` / `sweetbean.experiment`
+   submodules and pulls in user-facing methods (`Experiment.compile`,
+   `Experiment.to_html`, `Experiment.run_on_language`,
+   `CrossBlock.draw_design_graph`, …).
+2. **Introspection** (`generator/introspection.py`) resolves each
+   directive against the live wrapped libraries. Exception subclasses
+   are filtered out automatically — agents don't construct `*Error`
+   classes. Default `root_modules` is `("sweetpea", "sweetbean")`;
+   override per-call if you want a narrower walk.
+3. **LLM call** (`generator/adapters/`) sends a per-symbol prompt
+   built from `generator/prompts.py`. The default adapter shells out
+   to the local `claude` CLI in `--print --json-schema` mode (uses
+   the user's Claude Max subscription via the CLI's local OAuth — no
+   API key needed). The Anthropic API adapter is an opt-in fallback.
+   Adapter selection is env-only via `$EXPERIMENT_MCP_LLM_ADAPTER`.
+4. **Module rendering** (`generator/template.py`) emits one Python
+   file per symbol into `src/experiment_mcp/tools/generated/`.
+   Modules are namespaced by root (`sweetpea_block.py` vs
+   `sweetbean_block.py`) so the two libraries' identical class names
+   never collide. Each module imports its symbol's root package as
+   the canonical short alias (`sp` / `sb`).
+5. **Re-run** when SweetPea / SweetBean updates land. Source-hash
+   skip means unchanged symbols don't re-hit the LLM. Review the
+   diff in PR.
 
 Build-time codegen, not runtime. The server itself never talks to an
 LLM.
+
+### Regenerating the auto layer
+
+```bash
+uv run experiment-mcp-generate                 # full regen, real LLM
+uv run experiment-mcp-generate --dry-run       # placeholder ToolSpecs (CI sanity)
+uv run experiment-mcp-generate --only Experiment,CrossBlock
+uv run experiment-mcp-generate --rerender      # re-template from on-disk metadata,
+                                                # no LLM call
+```
+
+Default adapter is `claude_cli`. Override the model with
+`$EXPERIMENT_MCP_CLAUDE_MODEL` (default: `sonnet`); the per-call
+timeout with `$EXPERIMENT_MCP_CLAUDE_TIMEOUT_S` (default: 300s).
+
+### Source installs of SweetPea + SweetBean (NOT PyPI)
+
+`pyproject.toml` pins both wrapped libraries to upstream Git branches
+via `[tool.uv.sources]`:
+
+```toml
+sweetpea  = { git = "https://github.com/sweetpea-org/sweetpea-py", branch = "master" }
+sweetbean = { git = "https://github.com/AutoResearch/sweetbean",   branch = "main"   }
+```
+
+This is intentional and symmetric with how `psyneulink-mcp` pulls
+`psyneulink` from the upstream `devel` branch — PyPI lags both repos
+by months in practice. The first `uv lock` after a fresh clone takes
+~30s while uv clones both repos; subsequent ones are instant.
+SweetPea's SAT-solver C extensions (`pycryptosat`, `pycmsgen`,
+`pyunigen`) compile on first sync but cache between runs.
+
+Do **not** "fix" the asymmetry between sweetpea (`master`) and
+sweetbean (`main`) — those are the actual default branches upstream.
 
 ## Tool surface
 
@@ -191,8 +246,9 @@ publishing is opt-out via `EXPERIMENT_MCP_AUTO_FILE_ISSUES=0`.
 2. `npx @modelcontextprotocol/inspector uv run experiment-mcp` for the
    inspector (when there are tools to inspect).
 3. `uv run pytest` for tests.
-4. (future) `uv run python scripts/generate_tools.py` to regenerate
-   the auto layer.
+4. `uv run experiment-mcp-generate` (or `uv run python
+   scripts/generate_tools.py`) to regenerate the auto layer. Default
+   adapter is `claude_cli`; see "Regenerating the auto layer" above.
 
 ## Filling in the bones
 
@@ -210,8 +266,10 @@ Future work — pointers, not prescriptions:
   arbitrary Dataset against the TaskSpec it claims to satisfy.
 - **`tools/curated/feedback.py`** — `report_tool_issue` escape hatch
   (mirror `psyneulink-mcp/src/psyneulink_mcp/tools/curated/feedback.py`).
-- **`generator/seeds.txt`** — list `symbol:` / `package:` /
-  `import-walk:` lines once the generator lands.
+- **Real regen:** the dry-run pipeline is wired and tested; the next
+  step is a real `uv run experiment-mcp-generate` to fill the 130+
+  generated tool modules in `tools/generated/`. Review the diff
+  before merging.
 - **Roadmap issue:** see this repo's open `roadmap`-labeled issues for
   the canonical Phase 2 t6e plan and current status.
 - **Parent context:** [`../AGENTS.md`](../AGENTS.md) for the workspace

@@ -1,10 +1,8 @@
 """Auto-generated index. Do not edit by hand.
 
-Will be rewritten by the (future) `scripts/generate_tools.py` on every
-successful run, mirroring `psyneulink_mcp.tools.generated.__init__`.
+Rewritten by scripts/generate_tools.py on every successful run.
 On a fresh clone (no regen yet) the modules tuple is empty and
-``register_all`` is a safe no-op so the server boots without any
-generated surface present.
+register_all is a safe no-op.
 """
 
 from __future__ import annotations

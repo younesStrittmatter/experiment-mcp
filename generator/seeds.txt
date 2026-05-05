@@ -1,16 +1,70 @@
-# experiment-mcp generator seeds.
+# experiment-mcp seed directives — input to scripts/generate_tools.py.
 #
-# Mirrors the role of psyneulink-mcp/generator/seeds.txt: the symbol
-# selector that the (future) build-time codegen reads to decide which
-# library APIs to wrap as MCP tools. Empty for now — the generator
-# itself doesn't exist yet (Phase 2 t6e), and no SweetPea / SweetBean
-# symbol has been promoted to a tool surface.
+# Symmetric with psyneulink-mcp/generator/seeds.txt. Four directive
+# kinds, all dispatched through experiment_mcp.generator.introspection:
 #
-# Expected line shapes (same vocabulary as the sibling generator):
+#   import-walk: <module>           AST-walks every .py in <module>/, harvests
+#                                    every name imported from a root package
+#                                    (sweetpea / sweetbean) plus every attribute
+#                                    accessed on an aliased import.
+#   symbol: <qualname>              Single named symbol regardless.
+#   package: <module>               Every public class/function on the live
+#                                    module object. Filters out Exception /
+#                                    Warning subclasses automatically.
+#   method: <ClassQualname.method>  Single method on the named class.
 #
-#   symbol: sweetpea.Factor
-#   symbol: sweetbean.Stimulus.TextStimulus
-#   package: sweetbean.stimulus
-#   import-walk: sweetbean
+# Each directive's effects are unioned; results are deduped + sorted before
+# the LLM is invoked. Comments and blank lines are ignored.
 #
-# When the generator lands, fill this file before running it.
+# Coverage strategy: we want the FULL public surface of both wrapped libs.
+# Top-level packages are walked first, then their submodules for the
+# stimulus / response shapes that aren't reexported at the top.
+
+# --------------------------------------------------------------------------- #
+# SweetPea — factorial design DSL                                             #
+# --------------------------------------------------------------------------- #
+# The top-level reexports the user-facing API: factor types, derived levels,
+# distributions, generators, blocks, constraints, and a handful of
+# analysis/output functions. Walking the top-level pulls all of them.
+package: sweetpea
+
+# --------------------------------------------------------------------------- #
+# SweetBean — declarative experiment DSL (compiles to jsPsych)                #
+# --------------------------------------------------------------------------- #
+# Top-level reexports the experiment / block / response / spec primitives
+# plus a handful of free functions. Submodule walks below pick up the wide
+# stimulus / response catalogue that lives one level down.
+package: sweetbean
+package: sweetbean.stimulus
+package: sweetbean.stimulus_spec
+package: sweetbean.response_spec
+package: sweetbean.block
+package: sweetbean.experiment
+
+# --------------------------------------------------------------------------- #
+# Methods we want as standalone tools                                         #
+# --------------------------------------------------------------------------- #
+# An MCP agent that built a sweetbean.Experiment via create_experiment needs
+# explicit tools to compile / render / run it — those live as methods on the
+# class, not module-level callables. Each becomes a generated tool that
+# accepts an `experiment` handle plus the method's own kwargs.
+method: sweetbean.Experiment.compile
+method: sweetbean.Experiment.to_html
+method: sweetbean.Experiment.to_js
+method: sweetbean.Experiment.to_js_string
+method: sweetbean.Experiment.run_on_language
+
+# Block-level rendering helpers — useful for previewing one block in isolation
+# before composing the full experiment.
+method: sweetbean.Block.to_js
+method: sweetbean.Block.to_image
+
+# SweetPea CrossBlock graph dump — handy for debugging factor crossings, and
+# the only first-class visualisation surface SweetPea exposes.
+method: sweetpea.CrossBlock.draw_design_graph
+method: sweetpea.CrossBlock.crossing_size
+
+# Note: SweetPea's primary "run a design" entry point is the module-level
+# `synthesize_trials(block, samples=N, sampling_strategy=...)` function, which
+# `package: sweetpea` already covers. We deliberately do NOT bind every Block
+# method as a tool — most are internal scaffolding for the SAT solver.
