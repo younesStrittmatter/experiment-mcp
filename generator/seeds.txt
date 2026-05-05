@@ -1,0 +1,16 @@
+# experiment-mcp generator seeds.
+#
+# Mirrors the role of psyneulink-mcp/generator/seeds.txt: the symbol
+# selector that the (future) build-time codegen reads to decide which
+# library APIs to wrap as MCP tools. Empty for now — the generator
+# itself doesn't exist yet (Phase 2 t6e), and no SweetPea / SweetBean
+# symbol has been promoted to a tool surface.
+#
+# Expected line shapes (same vocabulary as the sibling generator):
+#
+#   symbol: sweetpea.Factor
+#   symbol: sweetbean.Stimulus.TextStimulus
+#   package: sweetbean.stimulus
+#   import-walk: sweetbean
+#
+# When the generator lands, fill this file before running it.

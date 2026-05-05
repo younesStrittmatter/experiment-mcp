@@ -1,0 +1,204 @@
+"""Append-only JSONL log of agent reports and auto-captured runtime errors.
+
+Symmetric with `psyneulink_mcp.feedback`. Two write paths feed the same
+file (`feedback/pending/issues.jsonl`):
+
+* `log_agent_report` — called by a future `report_tool_issue` MCP tool.
+* `log_runtime_error` — called by the `captured_tool` wrapper when any
+  registered tool raises.
+
+Entries share a common envelope; the `source` field distinguishes them.
+The next regen run (Phase 2 t6e+) will consume pending entries and
+archive them on success — same pattern as the sibling.
+
+We **do not** import sweetpea / sweetbean here. Their versions are
+recorded as ``"unavailable"`` if neither extra is installed; the
+``EXPERIMENT_MCP_*`` env vars override the local file path.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import functools
+import json
+import os
+import sys
+import traceback as _tb
+from collections.abc import Callable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal
+
+from . import __version__ as _server_version
+
+ToolLayer = Literal["generated", "curated"]
+IssueType = Literal[
+    "unclear_description",
+    "wrong_schema",
+    "missing_arg",
+    "wrong_behavior",
+    "other",
+]
+
+_PACKAGE_DIR = Path(__file__).resolve().parent
+_REPO_ROOT_DEFAULT = _PACKAGE_DIR.parent.parent
+
+ENV_FEEDBACK_PATH = "EXPERIMENT_MCP_FEEDBACK_PATH"
+
+_TOOL_LAYERS: dict[str, ToolLayer] = {}
+
+
+def lookup_tool_layer(tool_name: str) -> ToolLayer:
+    """Layer the tool was registered under, or "generated" if not found."""
+    return _TOOL_LAYERS.get(tool_name, "generated")
+
+
+def feedback_path() -> Path:
+    override = os.environ.get(ENV_FEEDBACK_PATH)
+    if override:
+        return Path(override)
+    return _REPO_ROOT_DEFAULT / "feedback" / "pending" / "issues.jsonl"
+
+
+def _domain_versions() -> dict[str, str]:
+    """Best-effort version probe for the wrapped libraries.
+
+    Imports are guarded so a server install without the `experiments`
+    extra still produces feedback envelopes — the field just records
+    "unavailable" for the missing libs.
+    """
+    versions: dict[str, str] = {}
+    for name in ("sweetpea", "sweetbean"):
+        try:
+            mod = __import__(name)
+        except Exception:
+            versions[name] = "unavailable"
+            continue
+        versions[name] = getattr(mod, "__version__", "unknown")
+    return versions
+
+
+def _now_iso() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _write_entry(entry: dict[str, Any]) -> None:
+    try:
+        path = feedback_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(entry, default=repr, ensure_ascii=False)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception as e:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            print(f"[experiment-mcp] feedback log failed: {e!r}", file=sys.stderr)
+
+
+def log_runtime_error(
+    tool_name: str,
+    tool_layer: ToolLayer,
+    args: dict[str, Any],
+    exc: BaseException,
+) -> None:
+    entry: dict[str, Any] = {
+        "timestamp": _now_iso(),
+        "source": "auto",
+        "tool_name": tool_name,
+        "tool_layer": tool_layer,
+        "domain_versions": _domain_versions(),
+        "server_version": _server_version,
+        "payload": {
+            "args": args,
+            "exception_type": type(exc).__name__,
+            "exception_message": str(exc),
+            "traceback": "".join(
+                _tb.format_exception(type(exc), exc, exc.__traceback__)
+            ),
+        },
+    }
+    _write_entry(entry)
+    _publish_runtime_error(entry)
+
+
+def _publish_runtime_error(entry: dict[str, Any]) -> None:
+    """Best-effort GitHub-issue mirror of the JSONL write.
+
+    The local JSONL is the source of truth for the (eventual) regen
+    pipeline; this is an *additional* surface so failures show up across
+    machines. Imported lazily so a broken/missing `feedback_publisher`
+    can't break logging, and wrapped to swallow every exception (the
+    runtime path must never raise from here).
+    """
+    try:
+        from . import feedback_publisher
+
+        feedback_publisher.try_file(entry)
+    except Exception as e:  # noqa: BLE001
+        with contextlib.suppress(Exception):
+            print(
+                f"[experiment-mcp] feedback publish dispatch failed: {e!r}",
+                file=sys.stderr,
+            )
+
+
+def log_agent_report(
+    tool_name: str,
+    tool_layer: ToolLayer,
+    issue_type: IssueType,
+    description: str,
+    suggested_fix: str | None = None,
+    agent_context: str | None = None,
+) -> None:
+    _write_entry(
+        {
+            "timestamp": _now_iso(),
+            "source": "agent",
+            "tool_name": tool_name,
+            "tool_layer": tool_layer,
+            "domain_versions": _domain_versions(),
+            "server_version": _server_version,
+            "payload": {
+                "issue_type": issue_type,
+                "description": description,
+                "suggested_fix": suggested_fix,
+                "agent_context": agent_context,
+            },
+        }
+    )
+
+
+def captured_tool(mcp: Any, layer: ToolLayer, **mcp_tool_kwargs: Any) -> Callable:
+    """Register a tool with `mcp` and auto-log any exception it raises.
+
+    Usage:
+
+        @captured_tool(mcp, layer="curated")
+        def my_tool(...): ...
+
+    Equivalent to `@mcp.tool(**mcp_tool_kwargs)` but the wrapped function
+    routes exceptions through `log_runtime_error` before re-raising.
+    """
+
+    def decorator(fn: Callable) -> Callable:
+        _TOOL_LAYERS[fn.__name__] = layer
+
+        @functools.wraps(fn)
+        def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                return fn(*args, **kwargs)
+            except Exception as exc:
+                log_runtime_error(
+                    tool_name=fn.__name__,
+                    tool_layer=layer,
+                    args={"args": list(args), "kwargs": dict(kwargs)},
+                    exc=exc,
+                )
+                raise
+
+        return mcp.tool(**mcp_tool_kwargs)(wrapper)
+
+    return decorator
